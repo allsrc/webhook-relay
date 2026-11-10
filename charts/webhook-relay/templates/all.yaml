@@ -6,6 +6,22 @@ data:
   config.yaml: |
 {{ .Values.config | toYaml | indent 4 }}
 ---
+{{- if .Values.persistence.hostPath }}
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: {{ .Release.Name }}-data-0
+spec:
+  capacity:
+    storage: {{ .Values.persistence.size }}
+  accessModes: [ReadWriteOnce]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: {{ .Release.Name }}-local
+  hostPath:
+    path: {{ .Values.persistence.hostPath }}
+    type: DirectoryOrCreate
+---
+{{- end }}
 apiVersion: v1
 kind: Service
 metadata:
@@ -37,6 +53,15 @@ spec:
     spec:
       securityContext: {fsGroup: 10001}
       terminationGracePeriodSeconds: 30
+      {{- if .Values.persistence.hostPath }}
+      initContainers:
+        - name: fix-data-permissions   # hostPath volumes ignore fsGroup
+          image: busybox:1.37
+          command: [sh, -c, "chown -R 10001:10001 /data && chmod 750 /data"]
+          securityContext: {runAsUser: 0, allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL], add: [CHOWN, FOWNER, DAC_OVERRIDE]}}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+      {{- end }}
       containers:
         - name: relay
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
@@ -62,7 +87,9 @@ spec:
         name: data
       spec:
         accessModes: [ReadWriteOnce]
-        {{- if .Values.persistence.storageClassName }}
+        {{- if .Values.persistence.hostPath }}
+        storageClassName: {{ .Release.Name }}-local
+        {{- else if .Values.persistence.storageClassName }}
         storageClassName: {{ .Values.persistence.storageClassName }}
         {{- end }}
         resources:

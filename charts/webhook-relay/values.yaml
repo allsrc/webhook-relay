@@ -6,6 +6,8 @@ service:
   nodePort: 31880
 persistence:
   size: 1Gi
+  # For clusters without a StorageClass: provision a Retain PV at this node path (single node only).
+  hostPath: ""
   storageClassName: ""
 # Existing Secret (not in Git) with keys: whatsapp-verify-token, whatsapp-app-secret
 secretName: webhook-relay-secrets
