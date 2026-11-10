@@ -1,0 +1,24 @@
+image:
+  repository: ghcr.io/shashikanth-gs/webhook-relay
+  tag: "0.1.0"  # pin an immutable tag or digest
+service:
+  type: NodePort
+  nodePort: 31880
+persistence:
+  size: 1Gi
+  storageClassName: ""
+# Existing Secret (not in Git) with keys: whatsapp-verify-token, whatsapp-app-secret
+secretName: webhook-relay-secrets
+config:
+  retain_hours: 24
+  db_path: /data/relay.db
+  providers:
+    whatsapp:
+      path: /whatsapp
+      verify_token_env: WHATSAPP_VERIFY_TOKEN
+      app_secret_env: WHATSAPP_APP_SECRET
+      routes: []
+      # - name: laptop
+      #   url: http://10.10.0.x:8080/webhooks/whatsapp
+      #   mode: primary
+      #   match: {phone_number_id: ["123"]}

@@ -1,0 +1,20 @@
+[project]
+name = "webhook-relay"
+version = "0.1.0"
+description = "Small durable webhook relay: one public callback, verified once, fanned out to primary and mirror targets."
+requires-python = ">=3.11"
+dependencies = ["fastapi>=0.115", "uvicorn>=0.32", "httpx>=0.27", "pyyaml>=6"]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/webhook_relay"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
