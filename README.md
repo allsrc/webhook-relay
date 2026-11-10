@@ -33,3 +33,5 @@ RELAY_CONFIG=config.yaml uv run uvicorn webhook_relay.app:from_env --factory --p
 Single replica only (SQLite on one volume). The Helm chart in `charts/webhook-relay` deploys a StatefulSet
 with a persistent volume holding the retry queue and error records, retained if the set is deleted.
 No delivery guarantee beyond at-least-once to each target; receivers must deduplicate.
+
+Logging: the container runs uvicorn with `--no-access-log`, because webhook verification puts the verify token in the query string. The relay logs its own accepted-event lines (provider, route count, size) and never request bodies or query strings.
