@@ -30,5 +30,6 @@ uv run --with pytest pytest -q
 RELAY_CONFIG=config.yaml uv run uvicorn webhook_relay.app:from_env --factory --port 8080
 ```
 
-Single replica only (SQLite on one volume). A Helm chart is in `charts/webhook-relay`.
+Single replica only (SQLite on one volume). The Helm chart in `charts/webhook-relay` deploys a StatefulSet
+with a persistent volume holding the retry queue and error records, retained if the set is deleted.
 No delivery guarantee beyond at-least-once to each target; receivers must deduplicate.
