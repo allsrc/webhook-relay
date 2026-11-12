@@ -36,4 +36,10 @@ Single replica only (SQLite on one volume). The Helm chart in `charts/webhook-re
 with a persistent volume holding the retry queue and error records, retained if the set is deleted.
 No delivery guarantee beyond at-least-once to each target; receivers must deduplicate.
 
+Multiple Meta apps can share the same callback path. Configure a provider per app with distinct signing secrets and
+verify tokens. GET verification accepts each provider's token; POST delivery selects the provider by its valid HMAC,
+then considers only that provider's routes. Use phone-number filters to limit each route to its intended sender.
+Shared paths reject empty or duplicate app secrets. The Helm chart's `extraEnv` accepts additional `secretKeyRef`
+environment entries; never put secret values in Helm values or Git.
+
 Logging: the container runs uvicorn with `--no-access-log`, because webhook verification puts the verify token in the query string. The relay logs its own accepted-event lines (provider, route count, size) and never request bodies or query strings.

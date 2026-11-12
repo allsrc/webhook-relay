@@ -72,6 +72,9 @@ spec:
               valueFrom: {secretKeyRef: {name: {{ .Values.secretName }}, key: whatsapp-verify-token}}
             - name: WHATSAPP_APP_SECRET
               valueFrom: {secretKeyRef: {name: {{ .Values.secretName }}, key: whatsapp-app-secret}}
+            {{- with .Values.extraEnv }}
+{{ toYaml . | indent 12 }}
+            {{- end }}
           readinessProbe: {httpGet: {path: /healthz, port: 8080}, periodSeconds: 10}
           livenessProbe: {httpGet: {path: /healthz, port: 8080}, periodSeconds: 30}
           resources: {requests: {cpu: 20m, memory: 64Mi}, limits: {memory: 256Mi}}

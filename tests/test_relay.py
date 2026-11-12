@@ -4,6 +4,7 @@ import json
 import time
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 
 from webhook_relay.app import create_app
@@ -76,3 +77,38 @@ def test_down_target_retries_and_does_not_block_other():
     d.run_once(now=t + 5)
     d.run_once(now=t + 60)
     assert store.stats() == {"done": 2} and calls["l"] == 3
+
+
+def test_apps_share_callback_without_cross_app_delivery():
+    providers = tuple(
+        Provider(name, "/whatsapp", token, secret, (Route(name, f"http://{name}/hook", phone_number_ids=frozenset({pid})),))
+        for name, token, secret, pid in [("first", "vt1", "secret1", "111"), ("second", "vt2", "secret2", "222")]
+    )
+    store = Store(":memory:")
+    seen = []
+    d = Deliverer(store, httpx.Client(transport=httpx.MockTransport(
+        lambda r: (seen.append(str(r.url)), httpx.Response(200))[1]
+    )))
+    c = TestClient(create_app(Config(providers=providers), store, d))
+    for token in ["vt1", "vt2"]:
+        assert c.get("/whatsapp", params={"hub.mode": "subscribe", "hub.verify_token": token, "hub.challenge": "9"}).text == "9"
+    assert c.get("/whatsapp", params={"hub.mode": "subscribe", "hub.verify_token": "bad"}).status_code == 403
+    for secret, pid in [("secret1", "111"), ("secret2", "222")]:
+        body = payload(pid)
+        header = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+        assert c.post("/whatsapp", content=body, headers={"x-hub-signature-256": header}).json() == {"queued": 1}
+    # A valid signature for one app cannot choose the other app's phone-number routes.
+    body = payload("222")
+    header = "sha256=" + hmac.new(b"secret1", body, hashlib.sha256).hexdigest()
+    assert c.post("/whatsapp", content=body, headers={"x-hub-signature-256": header}).json() == {"queued": 0}
+    assert c.post("/whatsapp", content=body).status_code == 401
+    assert c.post("/whatsapp", content=body, headers={"x-hub-signature-256": "sha256=bad"}).status_code == 401
+    d.run_once()
+    assert sorted(seen) == ["http://first/hook", "http://second/hook"]
+
+
+@pytest.mark.parametrize("second_secret", ["", "same"])
+def test_shared_callback_rejects_unsigned_or_ambiguous_apps(second_secret):
+    cfg = Config(providers=(Provider("first", "/whatsapp", "vt1", "same"), Provider("second", "/whatsapp", "vt2", second_secret)))
+    with pytest.raises(ValueError, match="distinct, nonempty"):
+        create_app(cfg, Store(":memory:"))

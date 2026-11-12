@@ -52,21 +52,34 @@ def create_app(config: Config, store: Store | None = None, deliverer: Deliverer 
     def healthz():
         return {"status": "ok", "queue": store.stats()}
 
-    def add_provider(p: Provider):
-        @app.get(p.path, name=f"{p.name}-verify")
+    def add_endpoint(path: str, providers: tuple[Provider, ...]):
+        # A shared callback selects the app by its signature, before considering routes.
+        # An unsigned fallback here would bypass every other app's access boundary.
+        if len(providers) > 1:
+            secrets = [p.app_secret for p in providers]
+            if not all(secrets) or len(set(secrets)) != len(secrets):
+                raise ValueError("providers sharing a path require distinct, nonempty app secrets")
+
+        @app.get(path, name=f"{providers[0].name}-verify")
         def verify(
             mode: str = Query(alias="hub.mode", default=""),
             token: str = Query(alias="hub.verify_token", default=""),
             challenge: str = Query(alias="hub.challenge", default=""),
         ):
-            if mode == "subscribe" and p.verify_token and hmac.compare_digest(token, p.verify_token):
+            if mode == "subscribe" and any(
+                p.verify_token and hmac.compare_digest(token, p.verify_token) for p in providers
+            ):
                 return Response(challenge, media_type="text/plain")
             raise HTTPException(403, "verification failed")
 
-        @app.post(p.path, name=f"{p.name}-receive")
+        @app.post(path, name=f"{providers[0].name}-receive")
         async def receive(request: Request):
             body = await request.body()
-            if p.app_secret and not signature_ok(p.app_secret, body, request.headers.get("x-hub-signature-256")):
+            header = request.headers.get("x-hub-signature-256")
+            p = next((p for p in providers if p.app_secret and signature_ok(p.app_secret, body, header)), None)
+            if p is None and len(providers) == 1 and not providers[0].app_secret:
+                p = providers[0]  # retain the explicitly unsigned single-provider mode
+            if p is None:
                 raise HTTPException(401, "bad signature")
             ids = phone_number_ids(body)
             headers = forwarded_headers(request.headers)
@@ -79,8 +92,11 @@ def create_app(config: Config, store: Store | None = None, deliverer: Deliverer 
             log.info("accepted provider=%s routes=%d bytes=%d", p.name, queued, len(body))
             return {"queued": queued}
 
+    paths: dict[str, list[Provider]] = {}
     for p in config.providers:
-        add_provider(p)
+        paths.setdefault(p.path, []).append(p)
+    for path, providers in paths.items():
+        add_endpoint(path, tuple(providers))
     return app
 
 

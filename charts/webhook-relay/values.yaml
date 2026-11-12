@@ -11,6 +11,7 @@ persistence:
   storageClassName: ""
 # Existing Secret (not in Git) with keys: whatsapp-verify-token, whatsapp-app-secret
 secretName: webhook-relay-secrets
+extraEnv: []  # additional secretKeyRef entries for other apps sharing the callback
 config:
   retain_hours: 24
   db_path: /data/relay.db
