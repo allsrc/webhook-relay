@@ -25,3 +25,13 @@ config:
       #   url: http://10.10.0.x:8080/webhooks/whatsapp
       #   mode: primary
       #   match: {phone_number_id: ["123"]}
+# Public entry through an Ingress controller (use instead of a NodePort behind a reverse proxy). Only the listed provider
+# paths are exposed (exact match); everything else gets the controller's 404.
+ingress:
+  enabled: false
+  className: ""
+  host: ""
+  annotations: {}
+  paths: ["/whatsapp"]
+# Private registry pull secret (created out-of-band), e.g. [ghcr-pull]
+imagePullSecrets: []

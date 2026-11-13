@@ -53,6 +53,12 @@ spec:
     spec:
       securityContext: {fsGroup: 10001}
       terminationGracePeriodSeconds: 30
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- range . }}
+        - name: {{ . }}
+        {{- end }}
+      {{- end }}
       {{- if .Values.persistence.hostPath }}
       initContainers:
         - name: fix-data-permissions   # hostPath volumes ignore fsGroup
