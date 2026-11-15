@@ -34,9 +34,27 @@ def phone_number_ids(body: bytes) -> set[str]:
         return set()
 
 
+def sender_lane(body: bytes) -> str:
+    """The WhatsApp contact(s) an event concerns; events for one sender are delivered in order."""
+    try:
+        data = json.loads(body)
+        found = set()
+        for e in data.get("entry", []):
+            for c in e.get("changes", []):
+                v = c.get("value", {})
+                found.update(str(m["from"]) for m in v.get("messages", []) if "from" in m)
+                found.update(str(x["recipient_id"]) for x in v.get("statuses", []) if "recipient_id" in x)
+        return "|".join(sorted(found))
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return ""
+
+
 def create_app(config: Config, store: Store | None = None, deliverer: Deliverer | None = None, start_worker=False):
     store = store or Store(config.db_path)
-    deliverer = deliverer or Deliverer(store, retain_hours=config.retain_hours)
+    routes = {(p.name, r.name): r for p in config.providers for r in p.routes}
+    deliverer = deliverer or Deliverer(
+        store, retain_hours=config.retain_hours, routes=routes, lag_warn_seconds=config.lag_warn_seconds
+    )
 
     @asynccontextmanager
     async def lifespan(_app):
@@ -82,13 +100,16 @@ def create_app(config: Config, store: Store | None = None, deliverer: Deliverer 
             if p is None:
                 raise HTTPException(401, "bad signature")
             ids = phone_number_ids(body)
+            sender = sender_lane(body)
             headers = forwarded_headers(request.headers)
             queued = 0
             for r in p.routes:
                 if r.phone_number_ids and not (r.phone_number_ids & ids):
                     continue
-                store.enqueue(p.name, r.name, r.url, r.mode, body, headers)
+                store.enqueue(p.name, r.name, r.url, r.mode, body, headers, sender=sender)
                 queued += 1
+            if queued:
+                deliverer.wake()
             log.info("accepted provider=%s routes=%d bytes=%d", p.name, queued, len(body))
             return {"queued": queued}
 
