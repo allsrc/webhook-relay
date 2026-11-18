@@ -4,6 +4,16 @@ image:
 service:
   type: NodePort
   nodePort: 31880
+# Queue backend. "sqlite" (default): single-replica StatefulSet + PVC. "postgres": Deployment, N replicas, no PVC;
+# the relay image needs the postgres extra. The postgresql:// URL lives in an existing Secret, never in values.
+store:
+  type: sqlite
+  urlSecret: {name: "", key: store-url}
+  leaseSeconds: 120  # claim lease; must exceed the slowest delivery. Expired leases of dead replicas are re-queued.
+replicas: 1  # >1 only with store.type=postgres
+podDisruptionBudget:
+  enabled: true  # postgres mode only
+  minAvailable: 1
 persistence:
   size: 1Gi
   # For clusters without a StorageClass: provision a Retain PV at this node path (single node only).

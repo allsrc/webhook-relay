@@ -1,0 +1,64 @@
+{{- if eq .Values.store.type "postgres" }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+spec:
+  replicas: {{ .Values.replicas }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxUnavailable: 0, maxSurge: 1}
+  selector:
+    matchLabels: {app: {{ .Release.Name }}}
+  template:
+    metadata:
+      labels: {app: {{ .Release.Name }}}
+      annotations:
+        checksum/config: {{ .Values.config | toYaml | sha256sum }}
+    spec:
+      securityContext: {fsGroup: 10001}
+      terminationGracePeriodSeconds: 30
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- range . }}
+        - name: {{ . }}
+        {{- end }}
+      {{- end }}
+      containers:
+        - name: relay
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          ports: [{containerPort: 8080}]
+          env:
+            - {name: RELAY_CONFIG, value: /etc/relay/config.yaml}
+            - {name: RELAY_LEASE_SECONDS, value: {{ .Values.store.leaseSeconds | quote }}}
+            - name: RELAY_STORE_URL
+              valueFrom: {secretKeyRef: {name: {{ .Values.store.urlSecret.name }}, key: {{ .Values.store.urlSecret.key }}}}
+            - name: WHATSAPP_VERIFY_TOKEN
+              valueFrom: {secretKeyRef: {name: {{ .Values.secretName }}, key: whatsapp-verify-token}}
+            - name: WHATSAPP_APP_SECRET
+              valueFrom: {secretKeyRef: {name: {{ .Values.secretName }}, key: whatsapp-app-secret}}
+            {{- with .Values.extraEnv }}
+{{ toYaml . | indent 12 }}
+            {{- end }}
+          # Readiness checks the store (SELECT 1); liveness does not, so a database outage drains pods instead of restarting them.
+          readinessProbe: {httpGet: {path: /readyz, port: 8080}, periodSeconds: 10}
+          livenessProbe: {httpGet: {path: /livez, port: 8080}, periodSeconds: 30}
+          resources: {requests: {cpu: 20m, memory: 64Mi}, limits: {memory: 256Mi}}
+          securityContext: {runAsNonRoot: true, allowPrivilegeEscalation: false, readOnlyRootFilesystem: true}
+          volumeMounts:
+            - {name: config, mountPath: /etc/relay}
+      volumes:
+        - name: config
+          configMap: {name: {{ .Release.Name }}-config}
+{{- if .Values.podDisruptionBudget.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ .Release.Name }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels: {app: {{ .Release.Name }}}
+{{- end }}
+{{- end }}

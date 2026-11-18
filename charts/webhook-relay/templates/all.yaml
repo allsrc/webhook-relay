@@ -1,3 +1,9 @@
+{{- if and (eq .Values.store.type "sqlite") (ne (int .Values.replicas) 1) }}
+{{- fail "replicas > 1 requires store.type=postgres (the SQLite queue is single-writer)" }}
+{{- end }}
+{{- if and (eq .Values.store.type "postgres") (not .Values.store.urlSecret.name) }}
+{{- fail "store.type=postgres requires store.urlSecret.name (Secret holding the postgresql:// URL)" }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -6,7 +12,7 @@ data:
   config.yaml: |
 {{ .Values.config | toYaml | indent 4 }}
 ---
-{{- if .Values.persistence.hostPath }}
+{{- if and (eq .Values.store.type "sqlite") .Values.persistence.hostPath }}
 apiVersion: v1
 kind: PersistentVolume
 metadata:
@@ -31,6 +37,7 @@ spec:
   selector: {app: {{ .Release.Name }}}
   ports: [{port: 8080, name: http}]
 ---
+{{- if eq .Values.store.type "sqlite" }}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -105,6 +112,7 @@ spec:
           requests:
             storage: {{ .Values.persistence.size }}
 ---
+{{- end }}
 apiVersion: v1
 kind: Service
 metadata:
