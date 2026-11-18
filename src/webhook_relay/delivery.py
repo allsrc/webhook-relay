@@ -8,7 +8,7 @@ from dataclasses import dataclass
 import httpx
 
 from webhook_relay.config import Route
-from webhook_relay.store import Store
+from webhook_relay.store import QueueStore
 
 log = logging.getLogger("relay")
 BACKOFF = [2, 10, 30, 120, 300, 900, 1800, 3600]
@@ -94,9 +94,14 @@ class Deliverer:
     unfinished row per (route, sender), which preserves a sender's event order within a route.
     """
 
-    def __init__(self, store: Store, client: httpx.Client | None = None, retain_hours: int = 24,
-                 routes: dict[tuple[str, str], Route] | None = None, lag_warn_seconds: float = 30.0):
+    def __init__(self, store: QueueStore, client: httpx.Client | None = None, retain_hours: int = 24,
+                 routes: dict[tuple[str, str], Route] | None = None, lag_warn_seconds: float = 30.0,
+                 max_attempts: dict[str, int] | None = None, backoff: list[float] | None = None,
+                 dead_retain_hours: float | None = None):
         self.store = store
+        self.max_attempts = MAX_ATTEMPTS | (max_attempts or {})
+        self.backoff = list(backoff) if backoff else BACKOFF
+        self.dead_retain = None if dead_retain_hours is None else dead_retain_hours * 3600
         self.client = client or httpx.Client(
             timeout=10, limits=httpx.Limits(max_connections=200, max_keepalive_connections=50)
         )
@@ -112,6 +117,7 @@ class Deliverer:
         self._settings: dict[tuple[str, str], RouteSettings] = {}
         self._thread: threading.Thread | None = None
         self._last_purge = 0.0
+        self._last_recover = 0.0
 
     def settings(self, key, mode) -> RouteSettings:
         with self._lock:
@@ -134,7 +140,7 @@ class Deliverer:
         self._wake.set()
 
     def recover(self, now: float | None = None) -> int:
-        """Re-queue rows left inflight by a previous process."""
+        """Re-queue rows left inflight by a previous process (SQLite: all; Postgres: only expired leases)."""
         n = self.store.recover_inflight(now)
         if n:
             log.warning("recovered %d inflight deliveries after restart", n)
@@ -179,7 +185,7 @@ class Deliverer:
                 break
             n += len(futures)
             wait(futures)
-        self.store.purge(now if now is not None else time.time(), self.retain)
+        self.store.purge(now if now is not None else time.time(), self.retain, self.dead_retain)
         return n
 
     def _work(self, key, row, s: RouteSettings, br: Breaker, base: float | None):
@@ -216,12 +222,12 @@ class Deliverer:
         if ok:
             self.store.mark_done(row["id"], now)
             self._lag(row, now, "done")
-        elif attempts >= MAX_ATTEMPTS.get(row["mode"], 3):
+        elif attempts >= self.max_attempts.get(row["mode"], 3):
             self.store.mark_dead(row["id"], attempts, now, err)
             log.warning("dead route=%s id=%s err=%s", row["route"], row["id"], err)
             self._lag(row, now, "dead")
         else:
-            self.store.mark_retry(row["id"], attempts, now + BACKOFF[min(attempts - 1, len(BACKOFF) - 1)], err)
+            self.store.mark_retry(row["id"], attempts, now + self.backoff[min(attempts - 1, len(self.backoff) - 1)], err)
 
     def _lag(self, row, finished: float, outcome: str):
         lag = finished - (row["created"] or finished)
@@ -234,10 +240,15 @@ class Deliverer:
         def loop():
             while not self._stop.is_set():
                 try:
+                    if time.time() - self._last_recover > 15:  # a crashed replica's expired leases
+                        self._last_recover = time.time()
+                        n = self.store.recover_expired(self._last_recover)
+                        if n:
+                            log.warning("recovered %d deliveries with expired leases", n)
                     self.dispatch()
                     if time.time() - self._last_purge > 60:
                         self._last_purge = time.time()
-                        self.store.purge(self._last_purge, self.retain)
+                        self.store.purge(self._last_purge, self.retain, self.dead_retain)
                 except Exception:  # keep the dispatcher alive; details never include bodies
                     log.exception("delivery loop error")
                     self._stop.wait(2.0)

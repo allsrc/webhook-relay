@@ -45,7 +45,7 @@ RELAY_CONFIG=config.yaml uv run uvicorn webhook_relay.app:from_env --factory --p
 
 A runnable target is in [`examples/receiver`](examples/receiver): it verifies the forwarded signature, deduplicates by message ID, and treats `X-Relay-Mode: mirror` as observe-only. `tests/test_example_receiver.py` runs relay and receivers together.
 
-Single replica only (SQLite on one volume). The Helm chart in `charts/webhook-relay` deploys a StatefulSet
+Default: single replica (SQLite on one volume). For N replicas use the PostgreSQL store (see "High availability"). The Helm chart in `charts/webhook-relay` deploys a StatefulSet
 with a persistent volume holding the retry queue and error records, retained if the set is deleted.
 No delivery guarantee beyond at-least-once to each target; receivers must deduplicate.
 
@@ -93,3 +93,34 @@ Logs never contain bodies or query strings.
 - `slow delivery route=<name> id=<id> lag=<s>s outcome=<done|dead>`: finished more than `lag_warn_seconds` after it was created.
 - `circuit open route=<name> failures=<n> cooldown=<s>s`: a route's breaker opened.
 - `recovered <n> inflight deliveries after restart`.
+
+## High availability (PostgreSQL store)
+
+The default store is SQLite and stays single-replica. Set `RELAY_STORE_URL=postgresql://...` to use PostgreSQL instead
+(install the extra: `pip install webhook-relay[postgres]`, or `docker build --build-arg EXTRAS=[postgres] .`). Then any
+number of replicas can share the queue:
+
+- Enqueue commits before the 200, as with SQLite. Claiming uses `FOR UPDATE SKIP LOCKED` plus a lease
+  (`locked_until`); a per-route advisory lock keeps per-sender lanes strictly ordered across replicas.
+- Recovery is lease-aware: a restarting replica only re-queues rows whose lease expired, so it never takes a live
+  replica's work. A dead replica's rows come back after `RELAY_LEASE_SECONDS` (default 120; keep it above connect + 3x
+  timeout of your slowest route). Delivery stays at-least-once.
+- Schema creation at start-up is guarded by an advisory lock, so replicas can start together.
+- `/readyz` checks the store (503 when unreachable); `/livez` does not touch it.
+
+Helm: `store.type=postgres`, `store.urlSecret.name` (existing Secret holding the URL, key `store-url`), `replicas`, and
+`podDisruptionBudget` (minAvailable 1) render a Deployment with no PVC. `replicas>1` with the default `sqlite` fails
+the render. The StatefulSet path is unchanged.
+
+| setting (env, or yaml key) | default | meaning |
+|---|---|---|
+| `RELAY_STORE_URL` | unset (SQLite at `db_path`) | `postgresql://` URL selects the Postgres store |
+| `RELAY_LEASE_SECONDS` | 120 | claim lease (Postgres) |
+| `RELAY_MAX_ATTEMPTS` / `max_attempts` | primary 8, mirror 3 | `12` (primary), or `primary=12,mirror=3` |
+| `RELAY_BACKOFF` / `backoff` | 2,10,30,120,300,900,1800,3600 | seconds between attempts, last value repeats |
+| `RELAY_DEAD_RETAIN_HOURS` / `dead_retain_hours` | = `retain_hours` | how long dead rows keep their bodies |
+
+Dead-letter replay: `webhook-relay replay --dead [--route NAME]` requeues dead rows with a fresh retry budget (run it
+where the relay runs, same env; e.g. `kubectl exec`). Caveat: ids of a lane are ordered by commit; if a lane is
+replayed while newer events for that sender are pending, the replayed (older) row is delivered after them only if
+those already completed, otherwise it is delivered first since its id is smaller.

@@ -33,6 +33,29 @@ class Config:
     retain_hours: int = 24
     providers: tuple[Provider, ...] = field(default_factory=tuple)
     lag_warn_seconds: float = 30.0
+    # Retry budget. Empty = the built-in defaults in delivery.py (primary 8 attempts, mirror 3).
+    max_attempts: tuple[tuple[str, int], ...] = ()  # e.g. (("primary", 12), ("mirror", 3))
+    backoff: tuple[float, ...] = ()  # seconds between attempts; the last value repeats
+    dead_retain_hours: float | None = None  # None = same as retain_hours
+
+
+def _parse_attempts(v) -> tuple[tuple[str, int], ...]:
+    """`12` (primary only), `primary=12,mirror=3`, or a mapping {primary: 12, mirror: 3}."""
+    if v in (None, ""):
+        return ()
+    if isinstance(v, dict):
+        return tuple((str(k), int(n)) for k, n in v.items())
+    text = str(v)
+    if "=" not in text:
+        return (("primary", int(text)),)
+    return tuple((k.strip(), int(n)) for k, n in (part.split("=", 1) for part in text.split(",") if part.strip()))
+
+
+def _parse_backoff(v) -> tuple[float, ...]:
+    if v in (None, ""):
+        return ()
+    items = v if isinstance(v, (list, tuple)) else str(v).split(",")
+    return tuple(float(x) for x in items if str(x).strip())
 
 
 def _opt(r: dict, key: str, cast):
@@ -67,9 +90,15 @@ def load(path: str) -> Config:
                 routes=routes,
             )
         )
+    env = os.environ
+    dead_retain = env.get("RELAY_DEAD_RETAIN_HOURS") or raw.get("dead_retain_hours")
     return Config(
         raw.get("db_path", "relay.db"),
         int(raw.get("retain_hours", 24)),
         tuple(providers),
         float(raw.get("lag_warn_seconds", 30)),
+        # Environment overrides the file; unset keeps the built-in budget.
+        _parse_attempts(env.get("RELAY_MAX_ATTEMPTS") or raw.get("max_attempts")),
+        _parse_backoff(env.get("RELAY_BACKOFF") or raw.get("backoff")),
+        float(dead_retain) if dead_retain not in (None, "") else None,
     )

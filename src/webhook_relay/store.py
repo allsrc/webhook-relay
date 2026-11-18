@@ -1,7 +1,46 @@
 import json
+import os
 import sqlite3
 import threading
 import time
+from typing import Protocol
+
+
+class QueueStore(Protocol):
+    """What the dispatcher and HTTP handlers need from a durable queue.
+
+    Rows are mappings with the `deliveries` columns (id, provider, route, url, mode, body, headers,
+    attempts, created, ...). Implementations: `Store` (SQLite, single process, default) and
+    `webhook_relay.store_pg.PostgresStore` (N replicas, leases)."""
+
+    def enqueue(self, provider, route, url, mode, body: bytes, headers: dict, now: float | None = None,
+                sender: str = "") -> int: ...
+    def due_routes(self, now: float) -> list[tuple[str, str, str]]: ...
+    def claim(self, provider: str, route: str, now: float, limit: int) -> list: ...
+    def recover_inflight(self, now: float | None = None) -> int: ...
+    def recover_expired(self, now: float | None = None) -> int: ...
+    def release(self, id_: int, now: float) -> None: ...
+    def mark_done(self, id_: int, now: float) -> None: ...
+    def mark_retry(self, id_: int, attempts: int, next_at: float, error: str) -> None: ...
+    def mark_dead(self, id_: int, attempts: int, now: float, error: str) -> None: ...
+    def kill_pending(self, provider: str, route: str, now: float, error: str) -> list[int]: ...
+    def requeue_dead(self, route: str | None = None, now: float | None = None) -> int: ...
+    def purge(self, now: float, retain_seconds: float, dead_retain_seconds: float | None = None) -> None: ...
+    def stats(self) -> dict: ...
+    def get(self, id_: int): ...
+    def ping(self) -> None: ...
+
+
+def open_store(db_path: str, url: str | None = None) -> QueueStore:
+    """SQLite unless a postgres URL is given (config `RELAY_STORE_URL`)."""
+    url = url if url is not None else os.environ.get("RELAY_STORE_URL", "")
+    if url.startswith(("postgres://", "postgresql://")):
+        from webhook_relay.store_pg import PostgresStore  # optional extra: webhook-relay[postgres]
+
+        return PostgresStore(url, lease_seconds=float(os.environ.get("RELAY_LEASE_SECONDS", "120")))
+    if url:
+        raise ValueError("RELAY_STORE_URL must be a postgresql:// URL (leave unset for SQLite)")
+    return Store(db_path)
 
 
 class Store:
@@ -87,6 +126,10 @@ class Store:
                 "UPDATE deliveries SET status='pending', next_at=?, claimed=NULL WHERE status='inflight'", (now,)
             ).rowcount
 
+    def recover_expired(self, now: float | None = None) -> int:
+        """SQLite has no leases (single process): nothing to expire."""
+        return 0
+
     def release(self, id_: int, now: float):
         with self._lock, self._db:
             self._db.execute(
@@ -127,9 +170,29 @@ class Store:
             )
             return ids
 
-    def purge(self, now: float, retain_seconds: float):
+    def requeue_dead(self, route: str | None = None, now: float | None = None) -> int:
+        """Dead-letter replay: put dead rows (optionally of one route) back to pending with a fresh budget."""
+        now = now if now is not None else time.time()
+        sql = "UPDATE deliveries SET status='pending', attempts=0, next_at=?, finished=NULL, claimed=NULL WHERE status='dead'"
+        args: list = [now]
+        if route:
+            sql += " AND route=?"
+            args.append(route)
         with self._lock, self._db:
-            self._db.execute("DELETE FROM deliveries WHERE finished IS NOT NULL AND finished<?", (now - retain_seconds,))
+            return self._db.execute(sql, args).rowcount
+
+    def purge(self, now: float, retain_seconds: float, dead_retain_seconds: float | None = None):
+        dead = retain_seconds if dead_retain_seconds is None else dead_retain_seconds
+        with self._lock, self._db:
+            self._db.execute(
+                "DELETE FROM deliveries WHERE finished IS NOT NULL AND finished<? AND "
+                "((status='dead' AND finished<?) OR status<>'dead')",
+                (now - retain_seconds, now - dead),
+            )
+
+    def ping(self) -> None:
+        with self._lock:
+            self._db.execute("SELECT 1")
 
     def stats(self) -> dict:
         with self._lock:

@@ -9,7 +9,7 @@ from fastapi import FastAPI, HTTPException, Query, Request, Response
 
 from webhook_relay.config import Config, Provider, load
 from webhook_relay.delivery import Deliverer, forwarded_headers
-from webhook_relay.store import Store
+from webhook_relay.store import QueueStore, open_store
 
 log = logging.getLogger("relay")
 
@@ -49,11 +49,13 @@ def sender_lane(body: bytes) -> str:
         return ""
 
 
-def create_app(config: Config, store: Store | None = None, deliverer: Deliverer | None = None, start_worker=False):
-    store = store or Store(config.db_path)
+def create_app(config: Config, store: QueueStore | None = None, deliverer: Deliverer | None = None, start_worker=False):
+    store = store or open_store(config.db_path)
     routes = {(p.name, r.name): r for p in config.providers for r in p.routes}
     deliverer = deliverer or Deliverer(
-        store, retain_hours=config.retain_hours, routes=routes, lag_warn_seconds=config.lag_warn_seconds
+        store, retain_hours=config.retain_hours, routes=routes, lag_warn_seconds=config.lag_warn_seconds,
+        max_attempts=dict(config.max_attempts), backoff=list(config.backoff) or None,
+        dead_retain_hours=config.dead_retain_hours,
     )
 
     @asynccontextmanager
@@ -69,6 +71,19 @@ def create_app(config: Config, store: Store | None = None, deliverer: Deliverer 
     @app.get("/healthz")
     def healthz():
         return {"status": "ok", "queue": store.stats()}
+
+    @app.get("/livez")
+    def livez():  # process liveness only; never touches the store, so a database blip does not restart pods
+        return {"status": "ok"}
+
+    @app.get("/readyz")
+    def readyz():
+        try:
+            store.ping()
+        except Exception:
+            log.exception("store not ready")
+            raise HTTPException(503, "store unavailable")
+        return {"status": "ready"}
 
     def add_endpoint(path: str, providers: tuple[Provider, ...]):
         # A shared callback selects the app by its signature, before considering routes.

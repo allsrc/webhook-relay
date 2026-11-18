@@ -5,6 +5,12 @@ description = "Small durable webhook relay: one public callback, verified once, 
 requires-python = ">=3.11"
 dependencies = ["fastapi>=0.115", "uvicorn>=0.32", "httpx>=0.27", "pyyaml>=6"]
 
+[project.optional-dependencies]
+postgres = ["psycopg[binary]>=3.1", "psycopg_pool>=3.2"]
+
+[project.scripts]
+webhook-relay = "webhook_relay.cli:main"
+
 [dependency-groups]
 dev = ["pytest>=8"]
 
